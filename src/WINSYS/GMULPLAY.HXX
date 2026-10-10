@@ -1,0 +1,225 @@
+// *-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+//
+//	 GMulPlay.hxx
+//		GenericMultiPlayer class definition.
+//
+//
+//	Who	When			Why
+// ---	---------	-----------------------------------------------
+//	CAM	14 JUN 96	Broke out from MultiPlayer class
+//
+// *-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+
+#ifndef _GMULPLAY_H
+#define _GMULPLAY_H
+
+#include <stdio.h>
+#include <string.h>
+#include <stdarg.h>
+#if defined(_WIN32)
+#include <wtypes.h>
+#endif
+#include "../TYPEDEFS.H"
+#include "../RESOURCE.H"
+
+/* Only MULPLAY.CPP uses <fstream>, and that file is Win32-only. Keeping the
+   include out of the POSIX build is not just about compile time: PLATFORM.H
+   macro-defines fopen() -> plat_fopen(), and libc++'s <fstream> calls fopen
+   from inside a template. Included after PLATFORM.H it either rebinds every
+   std::fstream to the game's path resolver (libc++ <= 20, silent) or fails to
+   compile with "no member named 'plat_fopen' in namespace 'std'" (libc++ >= 21).
+   Add <fstream> to the pre-include block in PLATFORM.H if the POSIX build ever
+   genuinely needs it. */
+#if defined(_WIN32)
+#include <fstream>
+#endif
+#include <climits>
+#if defined(_WIN32)
+#include "Direct.h"
+#endif
+
+#include "FILEXFER.HXX"
+
+// -- This needs to compile w/o the Windows.h stuff, so kludge away!
+//
+// These are typedefs, not macros, so the #ifndef guards never fire and
+// the typedefs are always emitted. On Win32 they happen to agree with
+// <windef.h>. On POSIX they do not: DWORD there is 32-bit (TYPEDEFS.H),
+// and `unsigned long` is 64-bit, so this block redefines it incompatibly.
+// TYPEDEFS.H and PLATFORM.H already supply every name below.
+#if defined(_WIN32)
+
+#ifndef USHORT
+typedef unsigned short USHORT;
+#endif
+#ifndef PSZ
+typedef char *PSZ;
+#endif
+#ifndef DWORD
+typedef unsigned long DWORD;
+#endif
+#ifndef MAX_PATH
+#define MAX_PATH          260
+#endif
+#ifndef UCHAR
+typedef unsigned char UCHAR;
+#endif
+#ifndef BYTE
+typedef unsigned char BYTE;
+#endif
+
+#endif	/* _WIN32 */
+ // -- End of kludge section
+
+ // -- User-PNetMod types
+#include "PNETTYPE.H"
+
+ // -- Prototype for the Chat Message alert sound routine
+
+typedef void (*FP_MISCPROC)( void );
+
+ // -- Forward reference to imported class
+
+class /* PROCACCESS */ GenericMultiPlayer
+{
+	// --
+	// --- Data Members ---
+	// --
+public:
+	 // -- MultiPlayer types
+	enum PlayType
+	{
+		iMP_NETMODEM,
+		iMP_INN,
+		iMP_SIGS,
+		iMP_NUMTYPES
+	};
+
+protected:
+
+	enum
+	{
+		MAX_MSG_SIZE	= MAX_NETBUFF,
+		iMPT_SYSTEM		= 0,			// system file type
+		iMPT_ANY		= 190, 			// any message is OK
+		iMPT_FILE		= 200,  		// flag to look for start file message
+	};
+
+	 // -- Class information
+
+	BOOL		fAvailable;			// Is Multi-Player play available?
+	FileXfer    pnmGame;			// multiplayer communication class
+	HINSTANCE	hiLib;			    // handle of the desired multiplayer library
+	PlayType	ptType;				// type of multiplayer play
+	PSZ		    pszRunDir;			// pointer to run directory
+
+	FP_MISCPROC fpMsgProc;		    // Message processing procedure
+
+	BOOL		fSent;				// status of the last send/receive
+
+	DWORD		dwMsgFudge;			// message fudge factor (to avoid msg Send/Send locks)
+	DWORD		dwMsgWaitS;			// send wait
+	DWORD		dwMsgTriesS; 		// tries for a send
+	DWORD		dwMsgWaitSR;		// receive in send loop
+	DWORD		dwMsgWaitR;			// rcv wait
+	DWORD		dwMsgWaitRS; 		// receive in rvc loop 
+	DWORD		dwMsgMasterFudge;	// master side fudge factor
+	DWORD		dwMsgMaxLoop;		// max loops
+
+	char		cRcvBuf[MAX_NETBUFF]; 	   // my receiving message buffer
+	char		cSndBuf[MAX_NETBUFF]; 	   // my sending message buffer
+	char		cNetBuf[MAX_NETBUFF]; 	   // network message buffer
+	ULONG	    ulSndMsgNum;  			   // synchronization id for sending
+	ULONG	    ulRcvMsgNum[MAX_PLAYERS];  // synchronization id for receiving
+
+	// --
+	// --- Member Functions ---
+	// --
+
+public:
+	GenericMultiPlayer		        ( void );
+	virtual ~GenericMultiPlayer		( void );
+
+	BOOL		CreateAGame			( PSZ pszPlayerName );
+	void		EnumerateGames		( GameDisplayStringFunction DString, long lContext );
+	void		EnumeratePlayers	( GameDisplayStringFunction DString, long lContext );
+	void		EnumerateProtocols  ( GameDisplayStringFunction DString, long lContext );
+	BOOL		Finalize			( void );
+
+	BOOL		Initialize			( PlayType ptType = iMP_NETMODEM );
+
+	BOOL		JoinAGame			( long lIndex, PSZ pszPlayerName );
+   BOOL		PeekForNextMessage  ( LPNETMSG pMsg );
+	BOOL		SelectAProtocol  	( long lIndex );
+
+   BOOL        IsNetworkingAvailable( void );
+
+   int         CheckConnectStatus( void );
+
+   int         ForceStart( void );
+   void        DisablePlayers( void );
+
+	virtual BOOL	StopTheGame		( void ) = 0;
+
+	BOOL		WaitForPlayer		( void );
+	int			WaitForPlayers		( void );
+
+	FileXfer    *GetNetModule      	( void );
+
+	BOOL		IsAvailable			( void );
+	BOOL		WasConnectionLost	( void );
+
+	void		SetMsgProc			( FP_MISCPROC f );
+	void		SetRunDir			( PSZ pszRunDir );
+
+	BOOL		IsModemGame			( void );
+
+protected:
+
+	virtual BOOL	HandleSpecialMessages( UCHAR usMsgId, long lMsgNum ) = 0;
+
+	virtual BOOL	LookForMessages( int fMulPlay = 1 )	= 0;
+
+	BOOL	ReceiveFile		( DWORD dwFrom, PSZ pNew );
+	BOOL	SendFile	    ( PSZ pszFile, unsigned int index );
+
+	void	SelectGuid		( int i );
+
+	BOOL	ReceiveMessage	( USHORT usType, DWORD dwWait, BOOL fOneOnly = FALSE,
+   							BOOL fAck = TRUE );
+
+	BOOL	SendBroadcastMessage( USHORT usType, short sSize, BOOL fAck = TRUE );
+	BOOL	SendDirectMessage	( DWORD dwToWhom, USHORT usType, short sSize, BOOL fAck = TRUE );
+
+   void  SetWaitTimes  ( USHORT usMultiplier = 1 );
+
+   DWORD   GetPlayerId ( void );
+
+   DWORD   GetAPlayerId ( int i );
+
+	int     GetDeletedPlayer( int i );
+
+	DWORD   GetDeletedPlayerId( int i );
+
+	void	ResetDeletedPlayer  ( int index );
+
+	int     GetAPlayerIndex ( DWORD dwPlayerId );
+
+	void    DeletePlayer  ( DWORD dwDelPlayerId );
+
+private:
+
+	BOOL	SendMessage		( DWORD dwToWhom, USHORT usType, short sSize, BOOL fAck = TRUE );
+
+	// -- private copy constructor / assignment operator
+	// -- they are declared but not defined so defaults are not made
+	// -- by the compiler!
+
+	GenericMultiPlayer ( const GenericMultiPlayer& org );
+	GenericMultiPlayer & operator= (const GenericMultiPlayer& org );
+
+}; // class MultiPlayer
+
+#endif
+
+//---- GMulPlay.hxx

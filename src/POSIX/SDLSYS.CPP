@@ -1,0 +1,1376 @@
+/* ========================================================================
+   SDLSYS.CPP - the SDL2 host backend for Linux/macOS.
+
+   Replaces WINSYS/MACHINE.C, SYSGRAPH.CPP, MOUSE.C, KEYINT.C and UTIL.C.
+   Those five files are the whole of the game's contract with the host OS
+   (MACHINE.H declares it); everything above them is portable.
+
+   The game still renders into a 640x480 8-bit paletted buffer exactly as
+   it did in 1997.  The only difference here is what happens to that
+   buffer at present time: instead of a GDI DIB section blitted through
+   StretchBlt, it is expanded through a palette LUT into a streaming
+   texture and scaled by the renderer.
+   ======================================================================== */
+#include "../PLATFORM.H"
+
+#include <SDL2/SDL.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include <signal.h>
+#include <unistd.h>
+#include <execinfo.h>
+
+#include "../TYPEDEFS.H"
+#include "../SYSTEM.H"
+#include "../MACHINE.H"
+#include "../MACHINT.H"
+#include "../ENGINE.H"
+#include "../MAIN.HXX"
+#include "../FILEUTIL.H"
+#include "../PLAYER.HXX"		/* PlayerSpeed, PlayerHiresSpeed */
+#include "../MENU.H"			/* sMenusUp */
+#include "../SOUND.HXX"			/* TurnOffAllSounds, ShutDownSoundSystem */
+
+/* REDBOOK.C; MACHINE.C declared these locally too. Every .C here builds
+   as C++, so these stay C++-mangled - no extern "C". */
+int InitRedBook(void);
+int ShutdownRedBook(void);
+
+/* ------------------------------------------------------------------------
+   Globals that used to live in WINSYS
+   ------------------------------------------------------------------------ */
+LONG	WindowWidth  = MAX_VIEW_WIDTH;
+LONG	WindowHeight = MAX_VIEW_HEIGHT;
+
+SHORT	sDrawMode = iGDI;		/* there is no DirectDraw path here */
+SHORT	sDrawType = iBLT;
+BOOL	fDrawing  = FALSE;
+BOOL	fQuitting = FALSE;
+BOOL	fAppHasFocus = TRUE;
+LONG	fps;
+
+BOOL	JustLoadWad = FALSE;
+BOOL	fSound = TRUE;
+BOOL	fMusic = TRUE;
+
+#if !defined(_RELEASE)
+BOOL	gDontFight = FALSE;
+#endif
+
+/* sysgraph.cpp */
+PTR			GDIscreen = NULL;
+COLORSPEC	CurPal[256];
+BOOL		fHighRes;
+SHORT		iDispBuffer = fERROR;
+LONG		disp_color;
+
+/* mouse.c */
+LONG	old_cursor_x, old_cursor_y;
+LONG	cursor_x, cursor_y, mouse_button;
+char	chCursorName[32];
+LONG	location_x, location_y;
+LONG	mouse_click = 0;
+LONG	mouse_present = TRUE;
+LONG	current_cursor;
+LONG	need_cursor_draw = FALSE;
+SHORT	cursor_bitmap;
+BOOL	fAutoRestoreCursor = FALSE;
+
+/* keyint.c */
+volatile unsigned char	key_stat[256];
+volatile BOOL			fAnyKeyChanged;
+
+/* machine.c owned these too. */
+int		iChatKey;
+LONG	lSavedX = -1;
+LONG	lSavedY = -1;
+
+/* machine.c owned these; the joystick is not wired up on this backend. */
+LONG	JoyXPos = 0, JoyYPos = 0, JoyZPos = 0;
+BOOL	JoyButton1 = FALSE, JoyButton2 = FALSE;
+BOOL	JoyButton3 = FALSE, JoyButton4 = FALSE;
+
+extern HWND hwndApp;			/* GAME.CPP */
+extern char pInitScene[];
+extern BOOL fLogComment;
+
+/* ------------------------------------------------------------------------
+   SDL state
+   ------------------------------------------------------------------------ */
+static SDL_Window   *gWindow  = NULL;
+static SDL_Renderer *gRender  = NULL;
+static SDL_Texture  *gTexture = NULL;		/* 640x480  */
+static SDL_Texture  *gTex2x   = NULL;		/* 1280x960, Scale2x output */
+
+static UBYTE   *gFrameBuf = NULL;			/* the 8bpp game buffer      */
+static UBYTE   *gScaleBuf = NULL;			/* 8bpp Scale2x scratch      */
+static Uint32   gPalLut[256];				/* palette -> ARGB8888       */
+
+static BOOL     fFadedOut = FALSE;
+static BOOL     fWindowShown = FALSE;
+static BOOL     fReleasePending = FALSE;	/* button up seen, not applied yet */
+
+/* Client-area size chosen on the options screen; the game buffer stays
+   640x480 and the renderer scales it, exactly as the Win32 build does. */
+static LONG GameWindowClientW = MAX_VIEW_WIDTH;
+static LONG GameWindowClientH = MAX_VIEW_HEIGHT;
+
+/* The DIB the Win32 build allocates is one row taller than the visible
+   frame; some engine paths write a scratch row past the bottom. */
+#define FRAME_ROWS	(MAX_VIEW_HEIGHT + 1)
+
+/* ========================================================================
+   Keyboard - the game indexes key_stat[] by Win32 virtual-key code, so
+   the backend translates rather than teaching the core SDL scancodes.
+   ======================================================================== */
+static int VKFromSDL(SDL_Keycode k, SDL_Scancode sc)
+{
+	if (k >= SDLK_a && k <= SDLK_z)
+		return 'A' + (k - SDLK_a);
+	if (k >= SDLK_0 && k <= SDLK_9)
+		return '0' + (k - SDLK_0);
+
+	switch (k)
+	{
+	case SDLK_BACKSPACE:	return VK_BACK;
+	case SDLK_TAB:			return VK_TAB;
+	case SDLK_CLEAR:		return VK_CLEAR;
+	case SDLK_RETURN:		return VK_RETURN;
+	case SDLK_KP_ENTER:		return VK_RETURN;
+	case SDLK_LSHIFT:
+	case SDLK_RSHIFT:		return VK_SHIFT;
+	case SDLK_LCTRL:
+	case SDLK_RCTRL:		return VK_CONTROL;
+	case SDLK_LALT:
+	case SDLK_RALT:			return VK_MENU;
+	case SDLK_PAUSE:		return VK_PAUSE;
+	case SDLK_CAPSLOCK:		return VK_CAPITAL;
+	case SDLK_ESCAPE:		return VK_ESCAPE;
+	case SDLK_SPACE:		return VK_SPACE;
+	case SDLK_PAGEUP:		return VK_PRIOR;
+	case SDLK_PAGEDOWN:		return VK_NEXT;
+	case SDLK_END:			return VK_END;
+	case SDLK_HOME:			return VK_HOME;
+	case SDLK_LEFT:			return VK_LEFT;
+	case SDLK_UP:			return VK_UP;
+	case SDLK_RIGHT:		return VK_RIGHT;
+	case SDLK_DOWN:			return VK_DOWN;
+	case SDLK_PRINTSCREEN:	return VK_SNAPSHOT;
+	case SDLK_INSERT:		return VK_INSERT;
+	case SDLK_DELETE:		return VK_DELETE;
+	case SDLK_HELP:			return VK_HELP;
+	case SDLK_KP_MULTIPLY:	return VK_MULTIPLY;
+	case SDLK_KP_PLUS:		return VK_ADD;
+	case SDLK_KP_MINUS:		return VK_SUBTRACT;
+	case SDLK_KP_PERIOD:	return VK_DECIMAL;
+	case SDLK_KP_DIVIDE:	return VK_DIVIDE;
+	case SDLK_NUMLOCKCLEAR:	return VK_NUMLOCK;
+	case SDLK_SCROLLLOCK:	return VK_SCROLL;
+	default:				break;
+	}
+
+	if (k >= SDLK_F1 && k <= SDLK_F12)
+		return VK_F1 + (k - SDLK_F1);
+	if (sc >= SDL_SCANCODE_KP_1 && sc <= SDL_SCANCODE_KP_0)
+		return (sc == SDL_SCANCODE_KP_0) ? VK_NUMPAD0
+										 : VK_NUMPAD1 + (sc - SDL_SCANCODE_KP_1);
+
+	/* Anything else keeps its ASCII value, which is what the game's own
+	   key tables assume for punctuation. */
+	return (k > 0 && k < 128) ? (int)k : 0;
+}
+
+static void KeyDown(int vk)
+{
+	if (vk <= 0 || vk > 255)
+		return;
+
+	if (!(key_stat[vk] & 0x80))			/* if not prohibited */
+	{
+		fAnyKeyChanged = TRUE;
+		key_stat[vk] = 0x81;			/* set key and prohibit */
+	}
+	key_stat[vk] |= 0x40;				/* key down */
+}
+
+static void KeyUp(int vk)
+{
+	if (vk <= 0 || vk > 255)
+		return;
+
+	key_stat[vk] &= 0x3F;				/* clear permit and keydown */
+	fAnyKeyChanged = TRUE;
+}
+
+LONG key_status(LONG k)
+{
+	LONG rv;
+
+	rv = key_stat[k] & 0x3F;
+	key_stat[k] &= 0xC0;
+	return rv;
+}
+
+LONG async_key_status(LONG k)
+{
+	return (key_stat[k] & 0x40);
+}
+
+void clear_key_status(LONG /*unused*/)
+{
+	ClearMessageQueue();
+	memset((void *)key_stat, 0, sizeof(key_stat));
+}
+
+LONG keys_down(void)
+{
+	return FALSE;						/* matches WINSYS/KEYINT.C */
+}
+
+void install_keyint(void) {}
+void remove_keyint(void) {}
+
+short GetAsyncKeyState(int vk)
+{
+	if (vk == VK_LBUTTON)
+		return (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_LEFT)) ? (short)0x8000 : 0;
+	if (vk == VK_RBUTTON)
+		return (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_RIGHT)) ? (short)0x8000 : 0;
+
+	return (vk > 0 && vk < 256 && (key_stat[vk] & 0x40)) ? (short)0x8000 : 0;
+}
+
+/* ========================================================================
+   Window-manager shims still called from the portable core
+   ======================================================================== */
+int GetClientRect(HWND /*hwnd*/, RECT *rc)
+{
+	int w = (int)GameWindowClientW, h = (int)GameWindowClientH;
+
+	if (gWindow != NULL)
+		SDL_GetWindowSize(gWindow, &w, &h);
+
+	rc->left = rc->top = 0;
+	rc->right  = w;
+	rc->bottom = h;
+	return TRUE;
+}
+
+int GetWindowRect(HWND hwnd, RECT *rc)
+{
+	int x = 0, y = 0;
+
+	GetClientRect(hwnd, rc);
+	if (gWindow != NULL)
+		SDL_GetWindowPosition(gWindow, &x, &y);
+
+	rc->left   += x;
+	rc->top    += y;
+	rc->right  += x;
+	rc->bottom += y;
+	return TRUE;
+}
+
+int ShowWindow(HWND /*hwnd*/, int cmd)
+{
+	if (gWindow == NULL)
+		return FALSE;
+
+	if (cmd == SW_HIDE)
+	{
+		SDL_HideWindow(gWindow);
+		fWindowShown = FALSE;
+	}
+	else
+	{
+		SDL_ShowWindow(gWindow);
+		fWindowShown = TRUE;
+	}
+	return TRUE;
+}
+
+HWND SetFocus(HWND hwnd)
+{
+	if (gWindow != NULL)
+		SDL_RaiseWindow(gWindow);
+	return hwnd;
+}
+
+int InvalidateRect(HWND /*hwnd*/, const RECT * /*rc*/, int /*erase*/)
+{
+	update_screen();
+	return TRUE;
+}
+
+int WinHelp(HWND, const char *, unsigned, unsigned long)
+{
+	return FALSE;						/* no WinHelp on this platform */
+}
+
+/* ========================================================================
+   Timing and errors (WINSYS/UTIL.C)
+   ======================================================================== */
+LONG get_time(void)
+{
+	return (LONG)(SDL_GetTicks() / 55);	/* a "tick" is 1/18s */
+}
+
+void pause(LONG t)
+{
+	LONG end = get_time() + t;
+
+	while (get_time() < end)
+		SDL_Delay(1);
+}
+
+ULONG get_free_mem(void)
+{
+	return (ULONG)(8 * 1024 * 1024);
+}
+
+char *safe_malloc(LONG size)
+{
+	char *x = (char *)malloc(size);
+
+	if (x == NULL)
+		fatal_error("Cant Malloc memory in safe_malloc");
+	return x;
+}
+
+void fatal_error(const char *format, ...)
+{
+	char	texbuffer[200];
+	FILE   *f;
+	va_list	argp;
+
+	va_start(argp, format);
+	vsnprintf(texbuffer, sizeof(texbuffer), format, argp);
+	va_end(argp);
+
+	close_graph();
+	remove_keyint();
+
+	printf("Fatal Error:%s\n", texbuffer);
+	fflush(stdout);
+
+	f = fopen("Fatal.err", "wt");
+	if (f != NULL)
+	{
+		fprintf(f, "Fatal Error:%s\n", texbuffer);
+		fclose(f);
+	}
+
+	if (gWindow != NULL)
+		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "FATAL ERROR", texbuffer, gWindow);
+
+	exit(0);
+}
+
+void UpdateFPS(void)
+{
+	static LONG lastTime = 0;
+	static LONG frames = 0;
+	LONG curTime = (LONG)SDL_GetTicks();
+
+	frames++;
+	if (curTime - 1000 > lastTime)
+	{
+		fps = frames;
+		lastTime = curTime;
+		frames = 0;
+	}
+}
+
+/* ========================================================================
+   Graphics (WINSYS/SYSGRAPH.CPP)
+   ======================================================================== */
+void set_hires(LONG, LONG)
+{
+	LONG NewMapCX, NewMapCY;
+
+	if (fHighRes == FALSE)
+	{
+		/* The buffer is always 640x480; the window may be larger and the
+		   renderer scales.  Never derive the buffer size from the window. */
+		WindowWidth  = MAX_VIEW_WIDTH;
+		WindowHeight = MAX_VIEW_HEIGHT;
+
+		fHighRes = TRUE;
+		set_screen_size(WindowWidth, WindowHeight);
+
+		set_mouse_max();
+
+		ZoomMapAbsolute(0, MapZoomFactor() / 2);
+
+		NewMapCX = MapCenterX() / 2;
+		NewMapCY = MapCenterY() * 2;
+		SetMapCenter(NewMapCX, NewMapCY);
+
+		PlayerSpeed = PlayerHiresSpeed;
+	}
+}
+
+void set_lowres(LONG, LONG)
+{
+	LONG NewMapCX, NewMapCY;
+
+	if (sMenusUp != 0)
+		return;
+
+	if (fHighRes == TRUE)
+	{
+		WindowWidth  /= 2;
+		WindowHeight /= 2;
+
+		fHighRes = FALSE;
+		set_screen_size(WindowWidth, WindowHeight);
+
+		set_mouse_max();
+
+		ZoomMapAbsolute(0, MapZoomFactor() * 2);
+
+		NewMapCX = MapCenterX() * 2;
+		NewMapCY = MapCenterY() / 2;
+		SetMapCenter(NewMapCX, NewMapCY);
+
+		PlayerSpeed = (SHORT)PlayerLoresSpeed;
+	}
+}
+
+/* Nothing pages video memory any more; kept because MACHINE.H declares
+   them and a couple of DOS-era call sites still reference them. */
+void set_svga_page(ULONG) {}
+LONG CalcPage(void) { return 0; }
+
+static BOOL CreatePresentTargets(void)
+{
+	SDL_RendererInfo info;
+
+	gTexture = SDL_CreateTexture(gRender, SDL_PIXELFORMAT_ARGB8888,
+								 SDL_TEXTUREACCESS_STREAMING,
+								 MAX_VIEW_WIDTH, MAX_VIEW_HEIGHT);
+	if (gTexture == NULL)
+		return FALSE;
+
+	/* Scale2x target. Optional: without it the renderer just scales the
+	   640x480 frame directly, which is what happens at 1:1 anyway. */
+	gTex2x = SDL_CreateTexture(gRender, SDL_PIXELFORMAT_ARGB8888,
+							   SDL_TEXTUREACCESS_STREAMING,
+							   MAX_VIEW_WIDTH * 2, MAX_VIEW_HEIGHT * 2);
+	if (gTex2x != NULL)
+	{
+		gScaleBuf = (UBYTE *)calloc(1, MAX_VIEW_WIDTH * 2 * MAX_VIEW_HEIGHT * 2);
+		if (gScaleBuf == NULL)
+		{
+			SDL_DestroyTexture(gTex2x);
+			gTex2x = NULL;
+		}
+	}
+
+	if (SDL_GetRendererInfo(gRender, &info) == 0)
+		printf("SDL renderer: %s\n", info.name);
+
+	return TRUE;
+}
+
+void init_graph(LONG init_mode)
+{
+	if (init_mode)
+	{
+		fHighRes = FALSE;				/* guarantee the resolution changes */
+		set_hires(0L, 0L);
+	}
+	else
+	{
+		fHighRes = TRUE;
+		set_lowres(0L, 0L);
+	}
+
+	init_pal("default");
+
+	if (gFrameBuf == NULL)
+	{
+		gFrameBuf = (UBYTE *)calloc(1, MAX_VIEW_WIDTH * FRAME_ROWS);
+		if (gFrameBuf == NULL)
+			fatal_error("init_graph: out of memory for the frame buffer");
+	}
+
+	screen    = (PTR)gFrameBuf;
+	GDIscreen = (PTR)gFrameBuf;
+
+	iDispBuffer = NewExternalBlock(screen);
+
+	if (gRender != NULL && gTexture == NULL)
+		CreatePresentTargets();
+
+	clear_screen();
+
+	init_shade_table("default");
+}
+
+void close_graph(void)
+{
+	if (gTexture != NULL)
+	{
+		SDL_DestroyTexture(gTexture);
+		gTexture = NULL;
+	}
+	if (gTex2x != NULL)
+	{
+		SDL_DestroyTexture(gTex2x);
+		gTex2x = NULL;
+	}
+	free(gScaleBuf);
+	gScaleBuf = NULL;
+}
+
+void set_pal(char *pal)
+{
+	int i;
+
+	for (i = 0; i < 256; i++)
+	{
+		run_timers();
+		gPalLut[i] = 0xFF000000u
+				   | ((Uint32)(UBYTE)pal[(i * 3)]     << 16)
+				   | ((Uint32)(UBYTE)pal[(i * 3) + 1] <<  8)
+				   |  (Uint32)(UBYTE)pal[(i * 3) + 2];
+	}
+
+	/* The Win32 build forces these two entries; palette-animated art
+	   depends on index 0 being black and 255 being white. */
+	gPalLut[0]   = 0xFF000000u;
+	gPalLut[255] = 0xFFFFFFFFu;
+}
+
+void load_pal(char *n)
+{
+	FILE *f = FileOpen(n, "rb");
+
+	if (f == NULL)
+		fatal_error("Palette not found: %s", n);
+
+	/* .col files carry an 8-byte header before the 256 RGB triples */
+	fread(&CurPal[0], sizeof(char), 8, f);
+	fread(&CurPal[0], sizeof(char), 768, f);
+	FileClose(f);
+
+	set_pal((char *)&CurPal[0]);
+}
+
+void init_pal(char *PalName)
+{
+	char pathbuffer[80];
+
+	sprintf(pathbuffer, "graphics\\%s.col", PalName);
+	load_pal(pathbuffer);
+}
+
+/* AdvMAME2x, byte-for-byte the same algorithm as the GDI path so both
+   backends produce identical pixels. */
+static void Scale2xFrame(LONG srcw, LONG srch)
+{
+	LONG x, y;
+
+	for (y = 0; y < srch; y++)
+	{
+		const UCHAR *row  = (const UCHAR *)gFrameBuf + y * MAX_VIEW_WIDTH;
+		const UCHAR *up   = (y > 0)        ? row - MAX_VIEW_WIDTH : row;
+		const UCHAR *down = (y < srch - 1) ? row + MAX_VIEW_WIDTH : row;
+		UCHAR *out0 = gScaleBuf + (2 * y) * (MAX_VIEW_WIDTH * 2);
+		UCHAR *out1 = out0 + (MAX_VIEW_WIDTH * 2);
+
+		for (x = 0; x < srcw; x++)
+		{
+			UCHAR P = row[x];
+			UCHAR A = up[x];
+			UCHAR D = down[x];
+			UCHAR C = (x > 0)        ? row[x - 1] : P;
+			UCHAR B = (x < srcw - 1) ? row[x + 1] : P;
+			UCHAR e0 = P, e1 = P, e2 = P, e3 = P;
+
+			if (A != D && C != B)
+			{
+				if (C == A) e0 = A;
+				if (A == B) e1 = B;
+				if (C == D) e2 = C;
+				if (B == D) e3 = D;
+			}
+
+			out0[2 * x]     = e0;
+			out0[2 * x + 1] = e1;
+			out1[2 * x]     = e2;
+			out1[2 * x + 1] = e3;
+		}
+	}
+}
+
+/* Expand an 8bpp buffer through the palette LUT straight into a locked
+   streaming texture. */
+/* Report an SDL failure once per call site. A present that fails silently
+   looks exactly like a game that draws nothing. */
+static void SDLFailed(const char *what, BOOL *pReported)
+{
+	if (!*pReported)
+	{
+		*pReported = TRUE;
+		printf("SDL: %s failed: %s\n", what, SDL_GetError());
+		fflush(stdout);
+	}
+}
+
+static void BlitIndexed(SDL_Texture *tex, const UBYTE *src, int w, int h)
+{
+	static BOOL fLockReported = FALSE;
+	void *pixels = NULL;
+	int   pitch  = 0;
+	int   x, y;
+
+	if (SDL_LockTexture(tex, NULL, &pixels, &pitch) != 0)
+	{
+		SDLFailed("SDL_LockTexture", &fLockReported);
+		return;
+	}
+
+	for (y = 0; y < h; y++)
+	{
+		const UBYTE *s = src + (size_t)y * w;
+		Uint32      *d = (Uint32 *)((Uint8 *)pixels + (size_t)y * pitch);
+
+		for (x = 0; x < w; x++)
+			d[x] = gPalLut[s[x]];
+	}
+
+	SDL_UnlockTexture(tex);
+}
+
+void update_screen(void)
+{
+	SDL_Texture *tex;
+	int cw = 0, ch = 0;
+
+	if (gRender == NULL || gFrameBuf == NULL)
+		return;
+
+	SDL_GetWindowSize(gWindow, &cw, &ch);
+
+	if (gScaleBuf != NULL && (cw > WindowWidth || ch > WindowHeight))
+	{
+		Scale2xFrame(WindowWidth, WindowHeight);
+		BlitIndexed(gTex2x, gScaleBuf, MAX_VIEW_WIDTH * 2, MAX_VIEW_HEIGHT * 2);
+		tex = gTex2x;
+	}
+	else
+	{
+		BlitIndexed(gTexture, gFrameBuf, MAX_VIEW_WIDTH, MAX_VIEW_HEIGHT);
+		tex = gTexture;
+	}
+
+	{
+		static BOOL fClearReported = FALSE, fCopyReported = FALSE;
+
+		if (SDL_RenderClear(gRender) != 0)
+			SDLFailed("SDL_RenderClear", &fClearReported);
+		if (SDL_RenderCopy(gRender, tex, NULL, NULL) != 0)
+			SDLFailed("SDL_RenderCopy", &fCopyReported);
+	}
+
+	/* BIRTHRT_SHOT=<n> writes frame n to shot.bmp straight out of the
+	   renderer. The only way to see what the game drew on a headless box,
+	   and it bypasses X entirely - a screenshot of the window cannot tell
+	   "the game drew nothing" apart from "the compositor showed nothing". */
+	{
+		static long lFrame  = 0;
+		static long lWanted = -2;
+		static long lEvery  = 0;
+
+		if (lWanted == -2)
+		{
+			const char *p = getenv("BIRTHRT_SHOT");
+
+			lWanted = -1;
+			if (p != NULL && sscanf(p, "%ld:%ld", &lWanted, &lEvery) < 1)
+				lWanted = -1;
+		}
+
+		++lFrame;
+		if (lEvery > 0 && lFrame > lWanted && ((lFrame - lWanted) % lEvery) == 0)
+			lWanted = lFrame;
+
+		if (lFrame == lWanted)
+		{
+			SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, cw, ch, 32,
+															SDL_PIXELFORMAT_ARGB8888);
+			char szName[64];
+
+			if (lEvery > 0)
+				sprintf(szName, "shot%05ld.bmp", lFrame);
+			else
+				strcpy(szName, "shot.bmp");
+
+			if (s != NULL)
+			{
+				if (SDL_RenderReadPixels(gRender, NULL, SDL_PIXELFORMAT_ARGB8888,
+										 s->pixels, s->pitch) == 0)
+					SDL_SaveBMP(s, szName);
+				else
+					printf("SDL_RenderReadPixels failed: %s\n", SDL_GetError());
+				SDL_FreeSurface(s);
+			}
+			printf("wrote %s at frame %ld (%dx%d)\n", szName, lFrame, cw, ch);
+			fflush(stdout);
+		}
+	}
+
+	SDL_RenderPresent(gRender);
+}
+
+/* The GDI backend clips a dirty rect and re-presents the whole frame so
+   partial updates stay bit-identical to update_screen.  A renderer has
+   no cheaper partial path, so this is just the full present.
+   ponytail: no dirty-rect tracking; add one only if presenting shows up
+   in a profile. */
+void ScreenCopy(SHORT, SHORT, SHORT, SHORT, SHORT, SHORT)
+{
+	update_screen();
+}
+
+void clear_screen(void)
+{
+	if (screen != NULL)
+		memset(screen, 0, MAX_VIEW_WIDTH * MAX_VIEW_HEIGHT);
+}
+
+void clear_screen_to(int c)
+{
+	if (screen != NULL)
+		memset(screen, c, MAX_VIEW_WIDTH * MAX_VIEW_HEIGHT);
+}
+
+void clear_display(void)
+{
+	clear_screen();
+}
+
+void FadeOut(USHORT steps)
+{
+	COLORSPEC	TempPal[256];
+	SHORT		i, j;
+
+	if (fFadedOut == TRUE)
+		return;
+
+	fFadedOut = TRUE;
+	fIsFadedOut = TRUE;
+
+	steps /= 32;
+
+	if (steps)
+	{
+		for (i = steps; i >= 0; i--)
+		{
+			for (j = 0; j < 256; j++)
+			{
+				TempPal[j].bRed   = (CurPal[j].bRed   * i) / steps;
+				TempPal[j].bGreen = (CurPal[j].bGreen * i) / steps;
+				TempPal[j].bBlue  = (CurPal[j].bBlue  * i) / steps;
+				run_timers();
+			}
+			set_pal((char *)TempPal);
+			/* GDI realized the palette on the live screen, so the fade was
+			   visible without redrawing.  Here the LUT only reaches the
+			   window through a present. */
+			update_screen();
+		}
+	}
+	else
+	{
+		memset((PTR)TempPal, 0, 768);
+		set_pal((char *)TempPal);
+		update_screen();
+	}
+}
+
+void FadeIn(USHORT steps)
+{
+	COLORSPEC	TempPal[256];
+	USHORT		i, j;
+
+	if (fFadedOut == FALSE)
+		return;
+
+	fFadedOut = FALSE;
+	fIsFadedOut = FALSE;
+
+	steps /= 32;
+
+	if (steps)
+	{
+		for (i = 0; i <= steps; i++)
+		{
+			for (j = 0; j < 256; j++)
+			{
+				TempPal[j].bRed   = (CurPal[j].bRed   * i) / steps;
+				TempPal[j].bGreen = (CurPal[j].bGreen * i) / steps;
+				TempPal[j].bBlue  = (CurPal[j].bBlue  * i) / steps;
+				run_timers();
+			}
+			set_pal((char *)TempPal);
+			update_screen();
+		}
+	}
+	else
+	{
+		set_pal((char *)CurPal);
+		update_screen();
+	}
+}
+
+/* ========================================================================
+   Mouse (WINSYS/MOUSE.C)
+   ======================================================================== */
+void init_mouse(CSTRPTR name, BOOL /*Centered*/)
+{
+	char path[256];
+
+	strcpy(chCursorName, name);
+
+	sprintf(path, "graphics\\%s.pcx", name);
+	cursor_bitmap = GetResourceStd(path, FALSE);
+	if (cursor_bitmap == fERROR)
+		fatal_error("init_mouse: file %s not found", name);
+
+	set_mouse_max();
+}
+
+void set_mouse_max(void) {}
+void set_mouse_position(LONG, LONG) {}
+void WinCursorSet(void) {}
+
+void read_mouse(void)
+{
+	RECT rc;
+	int  x = 0, y = 0;
+	Uint32 buttons;
+
+	GetClientRect(hwndApp, &rc);
+
+	if (rc.right && rc.bottom)
+	{
+		buttons = SDL_GetMouseState(&x, &y);
+
+		/* scale window coordinates back onto the 640x480 game buffer */
+		cursor_x = (LONG)x * WindowWidth  / rc.right;
+		cursor_y = (LONG)y * WindowHeight / rc.bottom;
+
+		/* Don't overwrite a press the game has not seen yet - that is
+		   WindowsMessages()' job. Otherwise a click released before the
+		   next read_mouse() disappears. */
+		if (!fReleasePending)
+		{
+			mouse_button = FALSE;
+
+			if (buttons & SDL_BUTTON(SDL_BUTTON_RIGHT))
+				mouse_button = 2;
+			else if (buttons & SDL_BUTTON(SDL_BUTTON_LEFT))
+				mouse_button = 1;
+		}
+	}
+}
+
+void update_buttons(void)
+{
+	Uint32 buttons = SDL_GetMouseState(NULL, NULL);
+
+	if (buttons & SDL_BUTTON(SDL_BUTTON_RIGHT))
+		mouse_button = 2;
+	else if (buttons & SDL_BUTTON(SDL_BUTTON_LEFT))
+		mouse_button = 1;
+}
+
+/* The 1997 software cursor (blit the cursor bitmap into the frame, then
+   restore what was under it) only ran in the DirectDraw path; in GDI mode
+   ForceCursor did nothing but call read_mouse(), and SDL is the same.
+
+   The read_mouse() call is the load-bearing part and is easy to miss:
+   MENU.C, REGIONS.C and PANEL.C bracket their drawing with
+   SysHideCursor()/SysShowCursor() every frame, and that is the ONLY thing
+   that updates cursor_x/cursor_y anywhere in the game. Stub these out and
+   the cursor reads 0,0 forever, so every region hit-test in
+   check_regions() is against the top-left corner and no click ever lands. */
+static BOOL fMouseHidden = TRUE;
+
+static void ForceCursor(void)
+{
+	if (!mouse_present)
+		return;
+
+	read_mouse();
+	/* GDI/SDL: the OS draws the pointer, nothing to blit. */
+}
+
+void SysHideCursor(void)
+{
+	if (!mouse_present || fMouseHidden)
+		return;
+
+	fMouseHidden = TRUE;
+}
+
+void SysShowCursor(void)
+{
+	if (fMouseHidden)
+	{
+		ForceCursor();
+		fMouseHidden = FALSE;
+	}
+}
+
+void SysForceCursor(void)
+{
+	ForceCursor();
+	fMouseHidden = FALSE;
+}
+
+void draw_cursor(void)
+{
+	if (fAutoRestoreCursor)
+	{
+		SysHideCursor();
+		SysShowCursor();
+	}
+	else
+		ForceCursor();
+}
+
+LONG cursor_in_box(LONG x1, LONG y1, LONG w, LONG h)
+{
+	return (cursor_x > x1 && cursor_y > y1 && cursor_x < x1 + w && cursor_y < y1 + h);
+}
+
+/* ========================================================================
+   Window sizing (WINSYS/MACHINE.C)
+   ======================================================================== */
+void DefaultMainWindowSize(UINT /*flags*/)
+{
+	SDL_DisplayMode dm;
+
+	if (gWindow == NULL)
+		return;
+
+	SDL_SetWindowSize(gWindow, (int)GameWindowClientW, (int)GameWindowClientH);
+
+	/* Cover the whole desktop -> go borderless, as the Win32 build does. */
+	if (SDL_GetDesktopDisplayMode(0, &dm) == 0 &&
+		GameWindowClientW >= dm.w && GameWindowClientH >= dm.h)
+	{
+		SDL_SetWindowBordered(gWindow, SDL_FALSE);
+		SDL_SetWindowPosition(gWindow, 0, 0);
+	}
+	else
+	{
+		SDL_SetWindowBordered(gWindow, SDL_TRUE);
+		SDL_SetWindowPosition(gWindow, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+	}
+}
+
+void SetGameResolution(LONG w, LONG h)
+{
+	if (w == GameWindowClientW && h == GameWindowClientH)
+		return;
+
+	GameWindowClientW = w;
+	GameWindowClientH = h;
+
+	DefaultMainWindowSize(0);
+	update_screen();
+}
+
+/* ========================================================================
+   Event pump - the SDL equivalent of the Win32 message loop
+   ======================================================================== */
+static void HandleEvent(const SDL_Event *ev)
+{
+	switch (ev->type)
+	{
+	case SDL_QUIT:
+		quit_sys(0);
+		break;
+
+	case SDL_KEYDOWN:
+		KeyDown(VKFromSDL(ev->key.keysym.sym, ev->key.keysym.scancode));
+		break;
+
+	case SDL_KEYUP:
+		KeyUp(VKFromSDL(ev->key.keysym.sym, ev->key.keysym.scancode));
+		break;
+
+	/* machine_pre_frame() (MAIN.CPP) turns mouse_button into a click only
+	   on the 0 -> non-zero edge, so the press has to be released again or
+	   there is never another edge. Releasing is deferred to
+	   WindowsMessages() below: a fast click can press and release inside a
+	   single pump, and clearing it here would mean the game never sees a
+	   frame with the button down. */
+	case SDL_MOUSEBUTTONDOWN:
+		if (ev->button.button == SDL_BUTTON_LEFT)
+			mouse_button = 1;
+		else if (ev->button.button == SDL_BUTTON_RIGHT)
+			mouse_button = 2;
+		break;
+
+	case SDL_MOUSEBUTTONUP:
+		if (ev->button.button == SDL_BUTTON_LEFT ||
+			ev->button.button == SDL_BUTTON_RIGHT)
+			fReleasePending = TRUE;
+		break;
+
+	case SDL_WINDOWEVENT:
+		switch (ev->window.event)
+		{
+		case SDL_WINDOWEVENT_FOCUS_LOST:
+			fAppHasFocus = FALSE;
+			break;
+		case SDL_WINDOWEVENT_FOCUS_GAINED:
+			fAppHasFocus = TRUE;
+			update_screen();
+			break;
+		case SDL_WINDOWEVENT_EXPOSED:
+			update_screen();
+			break;
+		default:
+			break;
+		}
+		break;
+
+	default:
+		break;
+	}
+}
+
+/* BIRTHRT_CLICK=<frame>:<x>:<y> synthesises a left click at that frame.
+   There is no way to drive the mouse on a headless box, and the click
+   path is a state machine across three layers (SDL event -> mouse_button
+   -> machine_pre_frame's edge detect -> mouse_click -> check_regions), so
+   this is what makes it testable at all. It also traces mouse_button and
+   mouse_click for a few frames either side. */
+static void InjectTestClick(void)
+{
+	static long lFrame  = 0;
+	static long lWanted = -2;
+	static long lEvery  = 0;
+	static int  iX = 0, iY = 0;
+	static LONG lPrevBtn = -1, lPrevClick = -1;
+
+	if (lWanted == -2)
+	{
+		const char *p = getenv("BIRTHRT_CLICK");
+
+		lWanted = -1;
+		if (p != NULL && sscanf(p, "%ld:%d:%d:%ld", &lWanted, &iX, &iY, &lEvery) < 3)
+			lWanted = -1;
+	}
+	if (lWanted < 0)
+		return;
+
+	lFrame++;
+
+	/* Optional 4th field repeats the click every N frames. Useful when
+	   probing for a frame that accepts input - the intro and the FLIC
+	   player run their own loops and legitimately eat clicks - but the
+	   default is a single shot so a click can be aimed at a real button. */
+	if (lEvery > 0 && lFrame > lWanted && ((lFrame - lWanted) % lEvery) == 0)
+		lWanted = lFrame;
+
+	if (lFrame == lWanted || lFrame == lWanted + 2)
+	{
+		SDL_Event e;
+
+		memset(&e, 0, sizeof(e));
+		e.type         = (lFrame == lWanted) ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+		e.button.button = SDL_BUTTON_LEFT;
+		e.button.state = (lFrame == lWanted) ? SDL_PRESSED : SDL_RELEASED;
+		e.button.x     = iX;
+		e.button.y     = iY;
+
+		if (lFrame == lWanted)
+			SDL_WarpMouseInWindow(gWindow, iX, iY);
+
+		{
+			int rc = SDL_PushEvent(&e);
+
+			printf("[click] frame %ld: pushed %s at %d,%d rc=%d (%s)\n", lFrame,
+				   (lFrame == lWanted) ? "DOWN" : "UP", iX, iY, rc,
+				   rc == 1 ? "queued" : SDL_GetError());
+		}
+	}
+
+	if (mouse_button != lPrevBtn || mouse_click != lPrevClick)
+	{
+		printf("[click] frame %ld: mouse_button=%ld mouse_click=%ld cursor=%ld,%ld\n",
+			   lFrame, (long)mouse_button, (long)mouse_click,
+			   (long)cursor_x, (long)cursor_y);
+		lPrevBtn   = mouse_button;
+		lPrevClick = mouse_click;
+	}
+}
+
+void WindowsMessages(void)
+{
+	SDL_Event ev;
+	LONG	  before = mouse_button;
+
+	InjectTestClick();
+
+	while (!fQuitting && SDL_PollEvent(&ev))
+		HandleEvent(&ev);
+
+	/* Release the button only once the game has had a whole frame with it
+	   down - `before` non-zero means it was already set when this pump
+	   started, so machine_pre_frame() has seen the edge. A press and
+	   release arriving in the same pump therefore survives to the next
+	   frame instead of being swallowed. */
+	if (fReleasePending && before != 0)
+	{
+		mouse_button = 0;
+		fReleasePending = FALSE;
+	}
+}
+
+void ClearMessageQueue(void)
+{
+	SDL_Event ev;
+
+	while (SDL_PollEvent(&ev))
+		HandleEvent(&ev);
+}
+
+void AppIdle(void)
+{
+	if (!fQuitting && fAppHasFocus)
+		MainLoop();
+
+	WindowsMessages();
+}
+
+/* ========================================================================
+   Startup / shutdown
+   ======================================================================== */
+void quit_sys(LONG)
+{
+	StopRedBook();
+	TurnOffAllSounds();
+	ShutDownSoundSystem();
+	CloseAllFiles();
+	fQuitting = TRUE;
+}
+
+static void AppExit(void)
+{
+	close_graph();
+	remove_keyint();
+	TurnOffAllSounds();
+	ShutdownRedBook();
+	QuitMemManag();
+
+	free(gFrameBuf);
+	gFrameBuf = NULL;
+
+	if (gRender != NULL)
+		SDL_DestroyRenderer(gRender);
+	if (gWindow != NULL)
+		SDL_DestroyWindow(gWindow);
+
+	SDL_Quit();
+}
+
+/* brsetup.cfg drives the install type and CD path, exactly as on Win32. */
+static BOOL ReadSetupCfg(void)
+{
+	FILE *fp = fopen("brsetup.cfg", "r");
+	char  cpBuffer[256];
+	LONG  fileResult;
+
+	if (fp == NULL)
+		return FALSE;
+
+	InstallationType = 2;					/* English default */
+
+	do
+	{
+		fileResult = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+		if (fileResult != EOF)
+		{
+			if (strcmp(cpBuffer, "[LOGCOMMENT]") == 0)
+			{
+				fLogComment = TRUE;
+			}
+			else if (strcmp(cpBuffer, "[INSTALL_TYPE]") == 0)
+			{
+				fileResult = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+				InstallationType = atoi(cpBuffer);
+			}
+			else if (strcmp(cpBuffer, "[CD]") == 0)
+			{
+				fileResult = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+				strcpy(CDDrive, cpBuffer);
+				strcat(CDDrive, ":\\");
+			}
+		}
+	} while (fileResult != EOF);
+
+	strcpy(InstallPath, ".\\");
+	fclose(fp);
+	return TRUE;
+}
+
+static BOOL AppInit(void)
+{
+	install_keyint();
+	CheckHandles();							/* FOPEN.C */
+
+	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_TIMER) != 0)
+	{
+		fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+		return FALSE;
+	}
+
+	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");	/* linear, ~= HALFTONE */
+
+	/* Created hidden: the game reveals the window itself from
+	   UpdateOptionSettings once the saved resolution is applied. */
+	gWindow = SDL_CreateWindow("Birthright - The Gorgon's Alliance",
+							   SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+							   (int)GameWindowClientW, (int)GameWindowClientH,
+							   SDL_WINDOW_HIDDEN);
+	if (gWindow == NULL)
+	{
+		fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+		return FALSE;
+	}
+
+	gRender = SDL_CreateRenderer(gWindow, -1, SDL_RENDERER_ACCELERATED);
+	if (gRender == NULL)
+		gRender = SDL_CreateRenderer(gWindow, -1, SDL_RENDERER_SOFTWARE);
+	if (gRender == NULL)
+	{
+		fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
+		return FALSE;
+	}
+
+	CreatePresentTargets();
+
+	hwndApp = (HWND)gWindow;
+
+	srand((unsigned)SDL_GetTicks());
+
+	if (!ReadSetupCfg())
+	{
+		fprintf(stderr, "Unable to open brsetup.cfg. Game not properly installed.\n");
+		return FALSE;
+	}
+
+	GameMain();
+
+	return TRUE;
+}
+
+/* ========================================================================
+   Crash reporting.
+
+   The box this runs on has core dumps disabled (ulimit -c 0), and a bare
+   "Segmentation fault" says nothing. Catch the fatal signals and write a
+   backtrace to both stderr and Fatal.err, where the game already puts its
+   fatal errors. Needs -rdynamic at link time for the function names.
+
+   Deliberately uses write()/backtrace_symbols_fd rather than printf:
+   those are async-signal-safe, and a handler that deadlocks in malloc
+   tells you even less than no handler at all.
+   ======================================================================== */
+static void CrashHandler(int sig)
+{
+	void *frames[64];
+	int   n = backtrace(frames, (int)(sizeof(frames) / sizeof(frames[0])));
+	const char *name;
+	int   fd;
+
+	switch (sig)
+	{
+	case SIGSEGV:	name = "SIGSEGV (segmentation fault)\n"; break;
+	case SIGBUS:	name = "SIGBUS (bus error)\n";           break;
+	case SIGFPE:	name = "SIGFPE (arithmetic error)\n";    break;
+	case SIGILL:	name = "SIGILL (illegal instruction)\n"; break;
+	case SIGABRT:	name = "SIGABRT (abort)\n";              break;
+	default:		name = "fatal signal\n";                 break;
+	}
+
+	write(STDERR_FILENO, "\n*** Birthright crashed: ", 25);
+	write(STDERR_FILENO, name, strlen(name));
+	backtrace_symbols_fd(frames, n, STDERR_FILENO);
+
+	fd = open("Fatal.err", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd >= 0)
+	{
+		write(fd, "Birthright crashed: ", 20);
+		write(fd, name, strlen(name));
+		backtrace_symbols_fd(frames, n, fd);
+		close(fd);
+	}
+
+	/* Restore the default action and re-raise, so the exit status and any
+	   core dump still reflect the real signal. */
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
+static void InstallCrashHandler(void)
+{
+	signal(SIGSEGV, CrashHandler);
+	signal(SIGBUS,  CrashHandler);
+	signal(SIGFPE,  CrashHandler);
+	signal(SIGILL,  CrashHandler);
+	signal(SIGABRT, CrashHandler);
+}
+
+int main(int argc, char *argv[])
+{
+	/* The game's diagnostics are all printf. Redirected to a file that is
+	   block-buffered, so a crash or a kill loses everything useful. */
+	setvbuf(stdout, NULL, _IOLBF, 0);
+
+	InstallCrashHandler();
+
+	parse_cmdline(argc, argv);
+
+	if (!AppInit())
+	{
+		fprintf(stderr, "Can't initialize BirthRight.\n");
+		return 1;
+	}
+
+	while (!fQuitting)
+		AppIdle();
+
+	AppExit();
+	return 0;
+}
+
+void parse_cmdline(int argc, char *argv[])
+{
+	extern char pwad[];		/* GAME.CPP - non-empty means boot into that wad */
+	int i;
+
+	for (i = 1; i < argc; i++)
+	{
+		/* "-wad WADS/DOOM_MW.WAD" is the POSIX spelling of the retail
+		   "w wadname.wad": skip the map and start in the adventure. */
+		if (strcmp(argv[i], "-wad") == 0 && i + 1 < argc)
+		{
+			strncpy(pwad, argv[++i], 39);
+			pwad[39] = '\0';
+			JustLoadWad = TRUE;
+		}
+	}
+}

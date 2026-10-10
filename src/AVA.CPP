@@ -1,0 +1,442 @@
+/* ========================================================================
+   Copyright (c) 1997	Synergistic Software
+   All Rights Reserved
+   ========================================================================
+	Character editor for Birthright--support file to load and save AVA files.
+   Filename: AVA.CPP
+   Author:	 John Conley
+   ======================================================================== */
+/* ------------------------------------------------------------------------
+   Includes
+   ------------------------------------------------------------------------ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef _WINDOWS
+#include "PLATFORM.H"
+#if defined(_WIN32)
+#include <windowsx.h>
+#endif
+#endif
+
+#include "SYSTEM.H"
+#include "ENGINE.H"
+
+#include "AVA.HXX"
+#include "BLOOD.HXX"
+
+#ifdef _WINDOWS								// Windows is required for these functions
+
+/* ========================================================================
+   Function    - WarnMessage
+   Description - Put a message in a message box and wait for a key.
+   Returns     - Nothing
+	Note:			- Does not abort.
+   ======================================================================== */
+static void WarnMessage (PSTR szMessage)
+{
+	MessageBox (NULL, szMessage, "Warning", MB_OK);
+}
+
+/* ========================================================================
+   Function    - mfReadTextData
+   Description - Read a .ava file and fill in the values
+   			 	 compute any values necessary from the .ava data.
+   Returns     - Status of last file read().
+	Note:			- Boldly lifted from LONG PLAYER_STATS::mfReadTextData
+   ======================================================================== */
+
+LONG AVA_FILE::mfReadTextData (FILE *fp)
+{
+	LONG			Result;
+	LONG			lTemp;
+	LONG			lTemp2;
+	LONG			lTemp3;
+	LONG			lTemp4;
+	LONG			lTemp5;
+	LONG			lTemp6;
+	char			cpBuffer[126];
+	
+	if (EOF != GetNextLine(fp, cpBuffer, sizeof(cpBuffer)))
+	{
+		sscanf(cpBuffer, "%d", &fFileVersion);
+	}
+	else
+	{
+		WarnMessage ("WARNING: No File version in AVA file.\n");
+		goto Leave_fn;
+	}
+	
+	if (EOF != GetNextLine(fp, cpBuffer, sizeof(cpBuffer)))
+	{
+		sscanf(cpBuffer, "%d", &lTemp);
+		fThingType = (THINGTYPE)lTemp;
+	}
+	else
+	{
+		WarnMessage ("WARNING: No ThingType Id in AVA file.\n");
+		fThingType = NO_THING;
+		goto Leave_fn;
+	}
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing  AVA Version number.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fStatsVersion);		
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing AVA strength ability info.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fStrength);
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing AVA dexterity ability info.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fDexterity);
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing AVA constitution ability info.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fConstitution);
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing AVA intelligence ability info.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fIntelligence);
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing AVA wisdom ability info.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fWisdom);
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing AVA charisma ability info.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fCharisma);
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing AVA player race info.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fRace);
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing player name index.\n");
+		goto Leave_fn;
+	}
+   // [d4-30-97 JPC] Changed to new style: player name is a string in
+	// the AVA file, not merely a pointer.
+	mfSetName (cpBuffer);
+
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing player title.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fTitle);
+
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing player description.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fDescription);
+
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing player alignment data.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fAlignment);			/* ALIGNMENT_TYPE */	
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing player hit point data in AVA file.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fHitPoints);				/* LONG */	
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing Armor Class information in AVA file.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fArmorClass);			/* LONG */	
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing Armor type information in AVA file.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fArmorType);			/* ARMOR_TYPE */	
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing Weapon type information in AVA file.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fWeapon);			/* WEAPON_TYPE */	
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing Morale data in AVA file.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d",  &fMorale);
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing Full HitPt data in AVA file.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fTotalHitPoints);
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing Thac0 data in AVA file.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fTHAC0);
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing Damage Dice data in AVA file.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "(%d %d %d) (%d %d %d)",
+	                   &lTemp, &lTemp2, &lTemp3, &lTemp4, &lTemp5, &lTemp6);
+	fDamageDice[0] = lTemp;
+	fDamageDice[1] = lTemp2;
+	fDamageDice[2] = lTemp3;
+	fDamageDice[3] = lTemp4;
+	fDamageDice[4] = lTemp5;
+	fDamageDice[5] = lTemp6;
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing Hit Dice data in AVA file.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "(%d %d %d)", &lTemp, &lTemp2, &lTemp3);
+	fHitDice[0] = lTemp;
+	fHitDice[1] = lTemp2;
+	fHitDice[2] = lTemp3;
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing Experience Pts data in AVA file.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d", &fExperience);
+	
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing class 1 data in AVA file.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d %d %d", &lTemp, &lTemp2, &lTemp3);
+	fClass1[0] = lTemp;
+	fClass1[1] = lTemp2;
+	fClass1[2] = lTemp3;
+
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("WARNING: Missing class 2 data in AVA file.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer, "%d %d %d", &lTemp, &lTemp2, &lTemp3);
+	fClass2[0] = lTemp;
+	fClass2[1] = lTemp2;
+	fClass2[2] = lTemp3;
+
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF == Result)
+	{
+		WarnMessage ("Warning: Missing number of Attacks in AVA file.\n");
+		goto Leave_fn;
+	}
+	sscanf(cpBuffer,"%d", &fAttacksPerRound);
+	
+	// Now Calculate the other fields as necessary.
+	
+	// Get bloodline information if present.  (It is not present in the
+	// "official" AVA files delivered with Birthright I.)
+	fBloodlineGrade = -1;					// [d5-07-97 JPC] -1 means "get info
+	fBloodlineDerivation = -1; 			// from regents array"
+	fBloodlineStrength = -1;
+	Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+	if (EOF != Result)
+	{
+		sscanf(cpBuffer,"%d", &fBloodlineGrade);
+		Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+		if (EOF != Result)
+		{
+			sscanf(cpBuffer,"%d", &fBloodlineDerivation);
+			Result = GetNextLine(fp, cpBuffer, sizeof(cpBuffer));
+			if (EOF != Result)
+			{
+				sscanf(cpBuffer,"%d", &fBloodlineStrength);
+			}
+		}
+	}
+	
+Leave_fn:
+	return Result;
+}
+
+/* ========================================================================
+   Function    - mfWriteTextData
+   Description - Write to an .ava file
+   Returns     - Status of last fwrite().
+   ======================================================================== */
+
+LONG AVA_FILE::mfWriteTextData (FILE *fp)
+{
+	fprintf (fp, "# File Version\n");
+	fprintf (fp, "%d\n", fFileVersion);
+
+	fprintf (fp, "# Thing type\n");
+	fprintf (fp, "%d\n", fThingType);
+
+	fprintf (fp, "# PLAYER_STATS class version\n");
+	fprintf (fp, "%d\n", fStatsVersion);
+
+	fprintf (fp, "# Strength\n");
+	fprintf (fp, "%d\n", fStrength);
+
+	fprintf (fp, "# Dexterity\n");
+	fprintf (fp, "%d\n", fDexterity);
+
+	fprintf (fp, "# Constitution\n");
+	fprintf (fp, "%d\n", fConstitution);
+
+	fprintf (fp, "# Intelligence\n");
+	fprintf (fp, "%d\n", fIntelligence);
+
+	fprintf (fp, "# Wisdom\n");
+	fprintf (fp, "%d\n", fWisdom);
+
+	fprintf (fp, "# Charisma\n");
+	fprintf (fp, "%d\n", fCharisma);
+
+	fprintf (fp, "# Race\n");
+	fprintf (fp, "%d\n", fRace);
+
+	fprintf (fp, "# Name\n");
+	fprintf (fp, "%s\n", mfGetName ());
+
+	fprintf (fp, "# Title\n");
+	fprintf (fp, "%d\n", fTitle);
+
+	fprintf (fp, "# Description\n");
+	fprintf (fp, "%d\n", fDescription);
+
+	fprintf (fp, "# Alignment\n");
+	fprintf (fp, "%d\n", fAlignment);
+
+	fprintf (fp, "# HitPoints\n");
+	fprintf (fp, "%d\n", fHitPoints);
+
+	fprintf (fp, "# ArmorClass\n");
+	fprintf (fp, "%d\n", fArmorClass);
+
+	fprintf (fp, "# ArmorType\n");
+	fprintf (fp, "%d\n", fArmorType);
+
+	fprintf (fp, "# Weapon\n");
+	fprintf (fp, "%d\n", fWeapon);
+
+	fprintf (fp, "# Morale\n");
+	fprintf (fp, "%d\n", fMorale);
+
+	fprintf (fp, "# TotalHitPoints\n");
+	fprintf (fp, "%d\n", fTotalHitPoints);
+
+	fprintf (fp, "# THAC0\n");
+	fprintf (fp, "%d\n", fTHAC0);
+
+	fprintf (fp, "# Damage Dice\n");
+	fprintf (fp, "(%d %d %d) (%d %d %d)\n",
+		fDamageDice[0],
+		fDamageDice[1],
+		fDamageDice[2],
+		fDamageDice[3],
+		fDamageDice[4],
+		fDamageDice[5]);
+
+	fprintf (fp, "# Hit Dice\n");
+	fprintf (fp, "(%d %d %d)\n",
+		fHitDice[0],
+		fHitDice[1],
+		fHitDice[2]);
+
+	fprintf (fp, "# Experience\n");
+	fprintf (fp, "%d\n", fExperience);
+
+	fprintf (fp, "# Player class information\n");
+	fprintf (fp, "%d %d %d\n",
+		fClass1[0],
+		fClass1[1],
+		fClass1[2]);
+	fprintf (fp, "%d %d %d\n",
+		fClass2[0],
+		fClass2[1],
+		fClass2[2]);
+
+	fprintf (fp, "# AttacksPerRound\n");
+	fprintf (fp, "%d\n", fAttacksPerRound);
+
+	fprintf (fp, "# BloodlineGrade\n");
+	fprintf (fp, "%d\n", fBloodlineGrade);
+
+	fprintf (fp, "# BloodlineDerivation\n");
+	fprintf (fp, "%d\n", fBloodlineDerivation);
+
+	fprintf (fp, "# BloodlineStrength\n");
+	fprintf (fp, "%d\n", fBloodlineStrength);
+
+	return 0;
+}
+
+#endif
