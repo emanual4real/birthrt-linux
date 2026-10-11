@@ -22,6 +22,9 @@
 #include <signal.h>
 #include <unistd.h>
 #include <execinfo.h>
+#include <ctype.h>
+#include <limits.h>
+#include <strings.h>
 
 #include "../TYPEDEFS.H"
 #include "../SYSTEM.H"
@@ -96,6 +99,7 @@ BOOL	JoyButton3 = FALSE, JoyButton4 = FALSE;
 extern HWND hwndApp;			/* GAME.CPP */
 extern char pInitScene[];
 extern BOOL fLogComment;
+extern BOOL fShowFPS;			/* MAIN.CPP */
 
 /* ------------------------------------------------------------------------
    SDL state
@@ -1226,6 +1230,92 @@ static BOOL ReadSetupCfg(void)
 	return TRUE;
 }
 
+static void LoadRuntimeConfig(void)
+{
+	char *basePath = SDL_GetBasePath();
+	char path[PATH_MAX];
+	FILE *fp;
+	char line[256];
+	int pathLength;
+
+	if (basePath == NULL)
+	{
+		fprintf(stderr, "Unable to locate executable directory for birthrt.cfg: %s\n",
+		        SDL_GetError());
+		return;
+	}
+
+	pathLength = snprintf(path, sizeof(path), "%sbirthrt.cfg", basePath);
+	if (pathLength < 0 || pathLength >= (int)sizeof(path))
+	{
+		fprintf(stderr, "Executable path is too long to locate birthrt.cfg.\n");
+		SDL_free(basePath);
+		return;
+	}
+	SDL_free(basePath);
+
+	fp = fopen(path, "r");
+	if (fp == NULL)
+	{
+		fprintf(stderr, "Unable to open runtime config %s; using defaults.\n", path);
+		return;
+	}
+
+	while (fgets(line, sizeof(line), fp) != NULL)
+	{
+		char *key = line;
+		char *value;
+		char *end;
+
+		while (isspace((unsigned char)*key))
+			key++;
+		if (*key == '\0' || *key == '#' || *key == '\n')
+			continue;
+
+		end = key + strlen(key);
+		while (end > key && isspace((unsigned char)end[-1]))
+			*--end = '\0';
+
+		value = strchr(key, '=');
+		if (value == NULL)
+		{
+			fprintf(stderr, "Ignoring malformed runtime config line: %s\n", key);
+			continue;
+		}
+
+		*value++ = '\0';
+		end = key + strlen(key);
+		while (end > key && isspace((unsigned char)end[-1]))
+			*--end = '\0';
+		while (isspace((unsigned char)*value))
+			value++;
+		end = value + strlen(value);
+		while (end > value && isspace((unsigned char)end[-1]))
+			*--end = '\0';
+
+		if (strcasecmp(key, "show_fps") != 0)
+		{
+			fprintf(stderr, "Unknown runtime config option: %s\n", key);
+		}
+		else if (strcasecmp(value, "true") == 0)
+		{
+			fShowFPS = TRUE;
+		}
+		else if (strcasecmp(value, "false") == 0)
+		{
+			fShowFPS = FALSE;
+		}
+		else
+		{
+			fprintf(stderr, "Invalid show_fps value '%s'; use true or false.\n", value);
+		}
+	}
+
+	if (ferror(fp))
+		fprintf(stderr, "Error reading runtime config %s.\n", path);
+	fclose(fp);
+}
+
 static BOOL AppInit(void)
 {
 	install_keyint();
@@ -1236,6 +1326,8 @@ static BOOL AppInit(void)
 		fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
 		return FALSE;
 	}
+
+	LoadRuntimeConfig();
 
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");	/* linear, ~= HALFTONE */
 

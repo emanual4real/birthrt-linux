@@ -62,6 +62,12 @@
 #include "PLACES.HXX"
 #include "TASK.H"
 
+#if defined(BIRTHRT_SDL)
+BOOL fShowFPS = FALSE;
+#else
+BOOL fShowFPS = TRUE;
+#endif
+
 #ifdef _WINDOWS
 #include "WINSYS/DDRAWPRO.H"
 #include "WINSYS/MULPLAY.HXX"       //---- Multiplay
@@ -559,12 +565,14 @@ void MainLoop(void)
 #endif
 	}       // if in domain turn else..
 
-	// Show frames per second
-	UpdateFPS();
-	color_rect( render_width/2, render_top+5, 60, 15, 0);
-	print_textf( render_width/2, render_top + 5, 31,"^F00F/S %d  T/F %d", fps, AverageTicksPerFrame());
-
-	ScreenCopy(0, render_width/2, render_top+5, 60, 15, SC_DEFAULT_RES);
+	if (fShowFPS)
+	{
+		UpdateFPS();
+		color_rect(render_width/2, render_top+5, 60, 15, 0);
+		print_textf(render_width/2, render_top + 5, 31,
+		            "^F00F/S %d  T/F %d", fps, AverageTicksPerFrame());
+		ScreenCopy(0, render_width/2, render_top+5, 60, 15, SC_DEFAULT_RES);
+	}
 
 	if (fPosition)
 		PrintLocationInfo();

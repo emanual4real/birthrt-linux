@@ -33,3 +33,11 @@ which contains `BRSETUP.CFG` and the game data. From the repository root, run:
 ```
 
 Note: audio doesn't work inside the devcontainer.  Copy assets and build outside and run.
+
+## Game Config
+
+Edit `birthrt.cfg` in the repository root to control the FPS/T-F overlay:
+set `show_fps=true` to show it or `show_fps=false` to hide it. Values are
+case-insensitive. CMake copies this file to `build-linux/birthrt.cfg` when
+configuring the Linux build, and rebuilding after editing the root file
+refreshes the copy used by the executable.

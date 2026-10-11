@@ -148,6 +148,8 @@ else ()
 		"KERNAUD.CPP" "KERNAUD.HPP" "POSIX/SDLAUDIO.CPP" "POSIX/SDLAUDIO.HPP")
 
 	add_executable (Birthrt ${BIRTHRT_CORE} ${BIRTHRT_POSIX})
+	configure_file ("${CMAKE_CURRENT_SOURCE_DIR}/../birthrt.cfg"
+		"${CMAKE_CURRENT_BINARY_DIR}/birthrt.cfg" COPYONLY)
 
 	# The 1997 sources are C++ even in the .C files - the Win32 build
 	# compiles them that way, so cross-TU globals are C++-mangled there.
