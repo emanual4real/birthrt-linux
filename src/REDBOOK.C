@@ -138,6 +138,11 @@ void PrintRedError (void)
 
 int InitRedBook(void)
 {
+#ifdef BIRTHRT_SDL
+	// There is no CD-audio device on SDL, but PlayTrack uses local MUSIC WAVs.
+	fCDAvailible = FALSE;
+	fMusic = 1;
+#else
 #ifdef _WINDOWS
 		if(mci_OpenCD() )
 			fCDAvailible = TRUE;
@@ -155,6 +160,7 @@ int InitRedBook(void)
 		fMusic = 1;
 	else
 		fMusic = 0;
+#endif
 	
 	return 1;
 }

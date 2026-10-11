@@ -31,3 +31,5 @@ which contains `BRSETUP.CFG` and the game data. From the repository root, run:
 ```sh
 (cd assets/disc_contents && ../../build-linux/Birthrt)
 ```
+
+Note: audio doesn't work inside the devcontainer.  Copy assets and build outside and run.

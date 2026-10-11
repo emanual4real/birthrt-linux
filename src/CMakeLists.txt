@@ -164,7 +164,7 @@ else ()
 	# _WINDOWS is this codebase's own "not DOS" switch (595 conditionals).
 	# The non-DOS branch is the right one on Linux/macOS too.
 	# AUDIO_LIB switches SOUND.CPP onto the kernel->Audio* path.
-	target_compile_definitions (Birthrt PRIVATE _WINDOWS AUDIO_LIB)
+	target_compile_definitions (Birthrt PRIVATE _WINDOWS AUDIO_LIB BIRTHRT_SDL)
 	target_include_directories (Birthrt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${SDL2_INCLUDE_DIRS})
 	# -rdynamic exports symbols into the dynamic table so the crash
 	# handler's backtrace shows function names rather than bare addresses.
