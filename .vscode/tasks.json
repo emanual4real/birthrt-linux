@@ -47,6 +47,22 @@
             "dependsOn": "Build Linux",
             "dependsOrder": "sequence",
             "problemMatcher": []
+        },
+        {
+            "label": "Clang-Tidy Linux",
+            "type": "process",
+            "command": "run-clang-tidy",
+            "args": [
+                "-p",
+                "build-linux",
+                "-checks=clang-analyzer-*"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
         }
     ]
 }
