@@ -271,8 +271,7 @@ void SaveGameFiles(FILE *fp)
     /* Save version, whoami, date, action_turn, etc. */
 
 	run_timers();
-    ver = SAVEFILE_VERSION;
-    fwrite(&ver, sizeof(LONG), 1, fp);
+    ver = SAVEFILE_VERSION;    fwrite(&ver, sizeof(LONG), 1, fp);
     fwrite(&HomeRealm,			sizeof(SHORT),			1, fp);
     fwrite(&date,				sizeof(LONG),			1, fp);
 

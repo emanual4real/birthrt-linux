@@ -4862,8 +4862,16 @@ BOOL UpdateDataArea (void)
 
     		mkdir("SaveGame");			// in case it's not there
 			fp = fopen(cur_sav, "wb");
-			SaveGameFiles(fp);
-			fclose(fp);
+			if (fp == NULL)
+			{
+				perror(cur_sav);
+			}
+			else
+			{
+				SaveGameFiles(fp);
+				if (fclose(fp) != 0)
+					perror(cur_sav);
+			}
 		}
 
 		LOGCOMMENTSLEEP
