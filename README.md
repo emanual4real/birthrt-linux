@@ -1,4 +1,5 @@
 # Birthright: The Gorgon's Alliance
+I'm a developer, but not a C++ developer.  This code is based off https://github.com/fire-lizard/birthrt and uses AI heavily.
 
 ## Building on Linux
 
