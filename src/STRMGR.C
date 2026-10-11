@@ -54,6 +54,7 @@ static SHORT DisposeStringBlock (SHORT iResBlk, SHORT iMemBlk);
    ------------------------------------------------------------------------ */
 static BLOCKHEADER blockHeader = {fERROR, 0};
 static SHORT hPrevStrDataBlock = fERROR;
+static LONG lAvailableStrings = 0;
 
 /* ========================================================================
    Function    - STRMGR_InitStrMgr
@@ -75,10 +76,17 @@ void STRMGR_InitStrMgr (void)
 		STR_FILE_HEADER fileHeader;
 		LONG numBytes = 0;
 		
-		// get the file header and check it matches.
+		// Read the file header and reject truncated or newer tables.
 		numBytes = read(iStringFile, &fileHeader, sizeof(fileHeader));
+		if (numBytes < sizeof(fileHeader))
+		{
+			DiskClose(iStringFile);
+			fatal_error("STRMGR ERROR! Unable to read file header for string table.\n");
+		}
+
+		fileHeader.cpDate[sizeof(fileHeader.cpDate) - 1] = '\0';
 		
-		if (fileHeader.version != STR_MAX_STRINGS || numBytes < sizeof(fileHeader))
+		if (fileHeader.version < 0 || fileHeader.version > STR_MAX_STRINGS)
 		{
 			DiskClose(iStringFile);
 			fatal_error("STRMGR ERROR! String Table built on %s doesn't match executable.\n",
@@ -93,7 +101,9 @@ void STRMGR_InitStrMgr (void)
 		{
 			fatal_error("STRMGR ERROR! Unable to read header for string table.\n");
 		}
-		
+
+		lAvailableStrings = fileHeader.version;
+
 		// Now register this resource.
 		RegisterResExtention("STR", LoadSTR, DisposeStringBlock, SetPurgeRes, ClrPurgeRes, HashID);
 	}
@@ -119,10 +129,24 @@ CSTRPTR STRMGR_GetStr(LONG iStrNum)
 	SHORT hStrDataBlock;
 	STRING_DATA_BLOCK *pStrDataBlock;
 	static char NullString[150];
+	static BOOL fWarnedMissingString = FALSE;
 
 	// make sure there is a valid file
 	if(blockHeader.sBlocks == fERROR)
 		STRMGR_InitStrMgr();
+
+	if (iStrNum < 0 || iStrNum >= lAvailableStrings)
+	{
+		if (!fWarnedMissingString)
+		{
+			fprintf(stderr,
+			        "WARNING: String ID %ld is not present in %s (table has %ld strings).\n",
+			        (long)iStrNum, STRINGFILENAME, (long)lAvailableStrings);
+			fWarnedMissingString = TRUE;
+		}
+		NullString[0] = 0;
+		return NullString;
+	}
 
 	// find the block the string is in
 	lWhichBlock = iStrNum / 100;

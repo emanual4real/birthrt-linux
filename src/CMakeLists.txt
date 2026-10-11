@@ -92,8 +92,8 @@ set (BIRTHRT_CORE
 	"PLATFORM.CPP")
 
 # Windows-only: DirectDraw/DirectSound/DirectPlay, the Win32 message loop
-# and the character-editor dialogs. The POSIX build leaves these out; the
-# SDL backend that replaces them is not written yet.
+# and the character-editor dialogs. The POSIX build replaces presentation
+# and audio with SDL2 and leaves the unsupported Windows-only features out.
 set (BIRTHRT_WIN32
 	"CHARED.CPP" "CHARED.HXX" "CHAREDIN.CPP" "CHAREDIN.HXX"
 	"CHAREDSY.H" "GETFILE.CPP" "GETFILE.HXX" "WINSYS/AFXRES.H"
