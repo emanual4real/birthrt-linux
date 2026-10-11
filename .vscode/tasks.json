@@ -1,0 +1,52 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Configure Linux build",
+            "type": "process",
+            "command": "cmake",
+            "args": [
+                "-S",
+                "src",
+                "-B",
+                "build-linux",
+                "-DCMAKE_BUILD_TYPE=Release"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Build Linux",
+            "type": "process",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "build-linux",
+                "--parallel"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "dependsOn": "Configure Linux build",
+            "dependsOrder": "sequence",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Linux build",
+            "type": "process",
+            "command": "${workspaceFolder}/build-linux/Birthrt",
+            "options": {
+                "cwd": "${workspaceFolder}/assets/disc_contents"
+            },
+            "dependsOn": "Build Linux",
+            "dependsOrder": "sequence",
+            "problemMatcher": []
+        }
+    ]
+}
