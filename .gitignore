@@ -1,4 +1,5 @@
 build/
 assets/
 build-linux/
+build-linux-debug/
 cache/
